@@ -6,10 +6,10 @@ from typing import Any
 
 import httpx
 import redis
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from .dispatcher import ArqDispatcher
-from .models import ExecutionBinding, TaskSystemOutbox, WorkflowTask, new_id, utcnow
+from .models import ExecutionBinding, TaskSystemOutbox, WorkflowNodeExecution, WorkflowTask, new_id, utcnow
 
 
 LOCAL_STATUS = {
@@ -120,7 +120,11 @@ class ExecutionTaskAdapter:
             # TASK_CREATE already establishes Pending; do not send a redundant
             # Pending -> Pending transition that some remote state machines reject.
             if status != "QUEUED":
-                self._enqueue(db, binding, "TASK_STATUS", None, {"status": ext, "businessStatus": business, "output": compact_output(payload or {}, self.settings.execution_task_output_max_bytes)}, f"task-status:{binding.id}:{status}")
+                transition = int(db.scalar(select(func.count(TaskSystemOutbox.id)).where(
+                    TaskSystemOutbox.binding_id == binding.id,
+                    TaskSystemOutbox.event_type == "TASK_STATUS",
+                )) or 0) + 1
+                self._enqueue(db, binding, "TASK_STATUS", None, {"status": ext, "businessStatus": business, "output": compact_output(payload or {}, self.settings.execution_task_output_max_bytes)}, f"task-status:{binding.id}:{transition}:{status}")
         self._publish(task_id)
 
     def step_status(self, task_id: str, run_id: str, step_code: str, step_name: str, status: str, attempt: int, payload: dict[str, Any] | None = None) -> None:
@@ -156,7 +160,42 @@ class ExecutionTaskAdapter:
                 "idempotentKey": binding.idempotency_key,
                 "executionMode": self.settings.execution_task_execution_mode,
             }, f"task-create:{binding.idempotency_key}")
+            self._enqueue(db, binding, "TASK_STATUS", None, {
+                "status": "Running", "businessStatus": "Retrying",
+                "output": {"run_id": run_id, "retry_seq": sequence},
+            }, f"task-status:{binding.id}:1:RETRYING")
+            # The new remote task starts empty while the local run resumes from its
+            # checkpoint. Rebuild the already-completed visible prefix on the new
+            # binding so remote step dependencies match local durable state.
+            if previous is not None:
+                completed = set(db.scalars(select(WorkflowNodeExecution.node_name).where(
+                    WorkflowNodeExecution.run_id == run_id,
+                    WorkflowNodeExecution.status == "SUCCEEDED",
+                )).all())
+                prior_events = db.scalars(select(TaskSystemOutbox).where(
+                    TaskSystemOutbox.binding_id == previous.id,
+                    TaskSystemOutbox.event_type.in_(["STEP_START", "STEP_STATUS"]),
+                    TaskSystemOutbox.status == "SUCCEEDED",
+                ).order_by(TaskSystemOutbox.event_seq)).all()
+                for event in prior_events:
+                    if event.step_code not in completed:
+                        continue
+                    if event.event_type == "STEP_STATUS" and event.payload.get("status") != "Success":
+                        continue
+                    self._enqueue(
+                        db, binding, event.event_type, event.step_code, dict(event.payload),
+                        f"checkpoint-replay:{binding.id}:{event.id}",
+                    )
         self._publish(task_id)
+
+
+def pending_execution_task_ids(storage: Any, limit: int = 100) -> list[str]:
+    """Return due Outbox task ids for periodic recovery of lost wake-up messages."""
+    with storage.session_factory() as db:
+        return list(db.scalars(select(TaskSystemOutbox.local_task_id).where(
+            TaskSystemOutbox.status == "PENDING",
+            or_(TaskSystemOutbox.next_attempt_at.is_(None), TaskSystemOutbox.next_attempt_at <= utcnow()),
+        ).distinct().order_by(TaskSystemOutbox.local_task_id).limit(limit)).all())
 
 
 def dispatch_execution_outbox(storage: Any, settings: Any, task_id: str) -> dict[str, Any]:
@@ -175,6 +214,7 @@ def dispatch_execution_outbox(storage: Any, settings: Any, task_id: str) -> dict
     if not lock_client.set(lock_key, owner, nx=True, ex=120):
         lock_client.close(); return {"status": "LOCKED"}
     dispatched = 0
+    failed = 0
     client = ExecutionTaskClient(settings)
     try:
         while True:
@@ -207,6 +247,7 @@ def dispatch_execution_outbox(storage: Any, settings: Any, task_id: str) -> dict
                     row.last_error = {"message": str(exc), "status_code": exc.status_code, "body": exc.body}
                     if not exc.retryable or row.attempts >= settings.execution_task_retry_max_attempts:
                         row.status = "FAILED"
+                        failed += 1
                         if row.event_type == "TASK_CREATE": binding.binding_status = "FAILED"
                     else:
                         # 首次失败等待 base*2^0，随后指数退避，并受生产配置上限保护。
@@ -218,7 +259,11 @@ def dispatch_execution_outbox(storage: Any, settings: Any, task_id: str) -> dict
                         retry_error = exc
             if retry_error is not None:
                 raise retry_error
-        return {"status": "OK", "dispatched": dispatched}
+        return {
+            "status": "PARTIAL_FAILURE" if failed else "OK",
+            "dispatched": dispatched,
+            "failed": failed,
+        }
     finally:
         client.client.close()
         try:

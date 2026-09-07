@@ -17,6 +17,7 @@ from .models import (
     WorkflowNodeExecution,
     DifyConversation,
     DifyInvocation,
+    ExecutionBinding,
     LLMInvocation,
     WorkflowRun,
     WorkflowTask,
@@ -599,6 +600,25 @@ class SQLAlchemyWorkflowStorage:
                     "occurred_at": e.occurred_at.isoformat(),
                 } for e in events],
             }
+
+    def execution_bindings(self, task_id: str) -> list[dict[str, Any]]:
+        """Return the complete local-run to remote-task retry history."""
+        with self.session_factory() as db:
+            rows = db.scalars(select(ExecutionBinding).where(
+                ExecutionBinding.local_task_id == task_id
+            ).order_by(ExecutionBinding.retry_seq)).all()
+            return [{
+                "binding_id": row.id,
+                "local_task_id": row.local_task_id,
+                "local_run_id": row.local_run_id,
+                "retry_seq": row.retry_seq,
+                "parent_binding_id": row.parent_binding_id,
+                "external_task_id": row.external_task_id,
+                "external_task_code": row.external_task_code,
+                "binding_status": row.binding_status,
+                "external_status": row.external_status,
+                "last_error": row.last_error,
+            } for row in rows]
 
 
 __all__ = [

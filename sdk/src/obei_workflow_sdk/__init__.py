@@ -18,6 +18,7 @@ from .event_bus import RedisEventBus
 from .execution_task import ExecutionTaskAdapter, dispatch_execution_outbox
 from .graph import HumanGateNode, Workflow, WorkflowGraph, WorkflowNode, WorkflowRegistry, export_workflow_definition
 from .llm import DifyAdapter, LLMNodeConfig, LLMRegistry, LLMRequest, LLMResponse, OpenAICompatibleAdapter, create_llm_registry
+from .run_stream import LLMRunHandle, RunStreamAdapter
 from .dify import BoundDifyClient, DifyAppClient, DifyAppConfig, DifyAppRegistry, DifyNodeConfig, DifyRequest, DifyResponse, create_dify_registry
 from .runtime import WorkflowRuntime
 from .settings import WorkflowSettings
@@ -42,6 +43,8 @@ __all__ = [
     "LLMRegistry",
     "LLMRequest",
     "LLMResponse",
+    "LLMRunHandle",
+    "RunStreamAdapter",
     "OpenAICompatibleAdapter",
     "NodeContext",
     "NodeOutput",

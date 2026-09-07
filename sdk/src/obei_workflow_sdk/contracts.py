@@ -162,6 +162,7 @@ class NodeContext:
         return self._services.storage.get_artifact(artifact_id)
 
     def raise_if_cancelled(self) -> None:
+        self._services.ensure_run_owned()
         if self._services.storage.is_cancel_requested(self.task_id):
             raise WorkflowCancelled("workflow cancellation requested")
 

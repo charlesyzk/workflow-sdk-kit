@@ -52,7 +52,7 @@ python -m pip install .\sdk
 | 工作流建模 | `Workflow`、`WorkflowGraph`、LangGraph | 定义节点和边 |
 | 节点生命周期 | 开始、成功、失败、attempt、当前节点 | 只实现 `execute()` |
 | 输入输出校验 | Pydantic + `StateField` | 声明节点输入输出模型 |
-| 普通节点 | 同步、异步和 yield 流式节点 | 实现纯代码或业务服务调用 |
+| 普通节点 | 异步节点；兼容同步函数并在线程执行 | 实现纯代码或业务服务调用，I/O 优先 async |
 | 直接模型节点 | OpenAI-compatible、流式 token、完整 messages 审计 | 维护需要的对话历史和 Prompt |
 | Dify 应用节点 | 独立 Chat App 客户端、可选 conversation_id、强制流式 | 按需启用历史并声明 inputs |
 | 自定义流式输出 | `NodeStreamChunk` + Redis Stream/SSE | 在节点中 yield 业务片段 |
@@ -254,6 +254,9 @@ TASK_STATUS Success/Failed/WaitingUser
 - 网络异常、429、5xx 指数退避；
 - 4xx 和超限错误记录到 `last_error`；
 - 本地任务重试时创建新的远端 Binding。
+- 一个本地 Run 可以按 `retry_seq` 保留多个 Binding/远端 taskId；新 Binding 会先
+  补发 Checkpoint 中已经成功的远端步骤，再从失败节点继续。
+- execution_sync Worker 每 15 秒扫描一次到期的 PENDING Outbox，补偿丢失的 Redis 唤醒。
 
 使用者必须先把 SDK 生成的步骤 JSON登记到远端，再把远端签发的 Key 填入：
 
@@ -294,7 +297,8 @@ SDK 从实际图生成：
 
 ## 11. 事件和 SSE
 
-SSE 订阅先回放数据库持久事件，再进入 Redis 实时流。客户端可以使用 `Last-Event-ID` 断线续读。
+SSE 订阅先记录 Redis Stream tail，再分页读完数据库持久事件，最后消费 tail 之后
+缓存的实时事件。客户端可以使用 `Last-Event-ID` 断线续读。
 
 常见事件：
 
@@ -315,6 +319,7 @@ SDK 提供 FastAPI Router：
 | POST | `/api/v1/tasks` | 提交工作流，返回 202 |
 | GET | `/api/v1/tasks/{task_id}` | 查询任务状态和最终产物 ID |
 | GET | `/api/v1/tasks/{task_id}/trace` | 查询节点和持久事件 |
+| GET | `/api/v1/tasks/{task_id}/execution-bindings` | 查询全部远端 taskId/Binding 重试历史 |
 | GET | `/api/v1/tasks/{task_id}/events` | SSE 实时事件 |
 | POST | `/api/v1/tasks/{task_id}/decisions` | 提交人工决定 |
 | POST | `/api/v1/tasks/{task_id}/retry` | 重试 FAILED 任务 |
@@ -337,6 +342,10 @@ Router 不包含企业认证。业务项目需要在外层增加认证、租户�
 - TaskSystem Adapter；
 - LLM Registry；
 - EventBus。
+
+调用方可直接传入 `event_bus`、`llm_registry` 和 `dify_registry`；显式传
+`event_bus=None` 可关闭实时事件。自定义“先 run、后 stream”的模型协议可继承
+`RunStreamAdapter`，实现 `run()` 与 `stream()` 后注册进 `LLMRegistry`。
 
 测试时可使用 SQLite、`InlineDispatcher` 和 `NullTaskSystemAdapter`，不需要启动 Redis 和远端任务系统。
 

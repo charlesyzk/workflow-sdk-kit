@@ -25,6 +25,13 @@ class WorkflowRuntime:
         self.task_system = task_system
         self.settings = settings
         self.services = RuntimeServices(storage=storage, task_system=task_system, event_bus=event_bus, llm_registry=llm_registry, dify_registry=dify_registry, settings=settings)
+        # Fail during application startup instead of after the first user task.
+        for workflow_type in registry.types():
+            workflow = registry.get(workflow_type)
+            builder = WorkflowGraph(workflow.state_model, self.services)
+            workflow.build(builder)
+            builder.registration_definition()
+            builder.compile(None)
         dispatcher.bind(self.execute)
 
     def submit(self, workflow_type: str, payload: dict[str, Any], actor_id: str) -> dict[str, str]:
@@ -83,7 +90,8 @@ class WorkflowRuntime:
                 graph_input: Any = Command(resume={current.id: {"decision": decision.decision, "feedback": decision.feedback or ""}})
             else:
                 graph_input = None if checkpoint else initial_state
-            result = await graph.ainvoke(graph_input, config=config, durability="sync")
+            with self.services.run_ownership(lock):
+                result = await graph.ainvoke(graph_input, config=config, durability="sync")
             if lock: lock.ensure_owned()
             final_snapshot = await graph.aget_state(config)
             final_interrupts = tuple(final_snapshot.interrupts)

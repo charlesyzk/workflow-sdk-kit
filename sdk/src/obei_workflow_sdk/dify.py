@@ -127,6 +127,7 @@ class DifyAppClient:
         usage: dict[str, Any] = {}
         conversation_id = request.conversation_id
         message_id = task_id = workflow_run_id = None
+        terminal_event: str | None = None
         timeout = httpx.Timeout(self.config.timeout_seconds, connect=20)
         async with httpx.AsyncClient(timeout=timeout, transport=self.transport) as http:
             async with http.stream("POST", url, headers=headers, json=body) as response:
@@ -143,6 +144,9 @@ class DifyAppClient:
                         continue
                     event = str(item.get("event") or "")
                     data = item.get("data") if isinstance(item.get("data"), dict) else {}
+                    if event in {"error", "workflow_failed"}:
+                        message = item.get("message") or data.get("error") or data.get("message") or event
+                        raise RuntimeError(f"Dify stream failed: {message}")
                     conversation_id = item.get("conversation_id") or conversation_id
                     message_id = item.get("message_id") or message_id
                     task_id = item.get("task_id") or task_id
@@ -172,10 +176,21 @@ class DifyAppClient:
                             await _emit(on_chunk, DifyChunk("content", answer, event, item))
                         continue
                     if event == "message_end":
+                        terminal_event = event
                         usage = (item.get("metadata") or {}).get("usage") or usage
                     if event == "workflow_finished" and isinstance(data.get("outputs"), dict):
+                        terminal_event = event
+                        if str(data.get("status") or "").lower() in {"failed", "error", "stopped"}:
+                            raise RuntimeError(
+                                f"Dify workflow failed: {data.get('error') or data.get('message') or data.get('status')}"
+                            )
                         outputs = data["outputs"]
                     await _emit(on_chunk, DifyChunk("provider_event", event=event, data=item))
+        expected_terminal = "workflow_finished" if request.operation == "workflow" else "message_end"
+        if terminal_event != expected_terminal:
+            raise RuntimeError(
+                f"Dify stream ended before {expected_terminal}; last terminal event was {terminal_event!r}"
+            )
         return DifyResponse("".join(content_parts), "".join(reasoning_parts), outputs, usage, conversation_id, message_id, task_id, workflow_run_id)
 
 

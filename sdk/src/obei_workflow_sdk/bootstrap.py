@@ -9,12 +9,15 @@ from .dispatcher import ArqDispatcher
 from .event_bus import RedisEventBus
 from .execution_task import ExecutionTaskAdapter
 from .graph import Workflow, WorkflowRegistry
-from .llm import create_llm_registry
-from .dify import create_dify_registry
+from .llm import LLMRegistry, create_llm_registry
+from .dify import DifyAppRegistry, create_dify_registry
 from .runtime import WorkflowRuntime
 from .settings import WorkflowSettings
 from .storage import SQLAlchemyWorkflowStorage
 from .task_system import DisabledTaskSystemAdapter
+
+
+_DEFAULT_EVENT_BUS = object()
 
 
 def create_runtime(
@@ -24,6 +27,9 @@ def create_runtime(
     storage: Any = None,
     dispatcher: Any = None,
     task_system: Any = None,
+    event_bus: Any = _DEFAULT_EVENT_BUS,
+    llm_registry: LLMRegistry | None = None,
+    dify_registry: DifyAppRegistry | None = None,
     create_tables: bool = False,
 ) -> WorkflowRuntime:
     """用最少参数组装可生产运行的工作流 Runtime。
@@ -67,7 +73,7 @@ def create_runtime(
             resolved_settings.resolved_event_bus_url,
             resolved_settings.event_stream_prefix,
             resolved_settings.event_stream_maxlen,
-        ),
-        llm_registry=create_llm_registry(resolved_settings),
-        dify_registry=create_dify_registry(resolved_settings),
+        ) if event_bus is _DEFAULT_EVENT_BUS else event_bus,
+        llm_registry=create_llm_registry(resolved_settings) if llm_registry is None else llm_registry,
+        dify_registry=create_dify_registry(resolved_settings) if dify_registry is None else dify_registry,
     )

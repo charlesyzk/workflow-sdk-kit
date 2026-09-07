@@ -6,7 +6,8 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.errors import GraphInterrupt
@@ -16,11 +17,12 @@ from pydantic import BaseModel
 from .contracts import NodeContext, NodeOutput, NodeStreamChunk, StateField, TaskStep, WorkflowInput
 from .llm import LLMNodeConfig, LLMRequest
 from .dify import DifyNodeConfig, DifyRequest
-from .run_lock import RedisDifyConversationLock
+from .run_lock import RedisDifyConversationLock, WorkflowRunLockLost
 
 
 NodeInputT = TypeVar("NodeInputT", bound=BaseModel)
 NodeDataT = TypeVar("NodeDataT")
+_RUN_OWNERSHIP_GUARD: ContextVar[Any] = ContextVar("workflow_run_ownership_guard", default=None)
 
 
 @dataclass
@@ -32,6 +34,19 @@ class RuntimeServices:
     llm_registry: Any = None
     dify_registry: Any = None
     settings: Any = None
+
+    @contextmanager
+    def run_ownership(self, guard: Any):
+        token = _RUN_OWNERSHIP_GUARD.set(guard)
+        try:
+            yield
+        finally:
+            _RUN_OWNERSHIP_GUARD.reset(token)
+
+    def ensure_run_owned(self) -> None:
+        guard = _RUN_OWNERSHIP_GUARD.get()
+        if guard is not None:
+            guard.ensure_owned()
 
     def event(self, task_id: str, run_id: str, event_type: str, **kwargs: Any) -> int:
         """先持久化业务事件，再发布实时副本；数据库序号用于断线续传。"""
@@ -47,6 +62,7 @@ class RuntimeServices:
 
     async def invoke_llm(self, context: NodeContext, adapter_name: str, request: LLMRequest, *, stage: str | None = None):
         """执行 Adapter 调用，并保证成功、失败都完成 LLM 审计记录。"""
+        self.ensure_run_owned()
         adapter = self.llm_registry.get(adapter_name)
         model = request.model or adapter.default_model
         invocation_id = self.storage.start_llm_invocation(
@@ -68,6 +84,7 @@ class RuntimeServices:
 
         try:
             response = await adapter.generate(request, on_chunk=on_chunk if request.stream else None)
+            self.ensure_run_owned()
             self.storage.finish_llm_invocation(invocation_id, response=response.content, reasoning=response.reasoning, usage=response.usage, provider_request_id=response.provider_request_id)
             self.transient_event(context.task_id, "llm_end", node_name=context.node_code, stage=stage, invocation_id=invocation_id, source="direct_model", provider=adapter_name, usage=response.usage)
             return response
@@ -88,6 +105,7 @@ class RuntimeServices:
     ):
         """Invoke one registered app; history calls are serialized by a Redis lease lock."""
 
+        self.ensure_run_owned()
         if self.dify_registry is None:
             raise RuntimeError("Dify app registry is not configured")
         client = self.dify_registry.get(app_name)
@@ -145,6 +163,7 @@ class RuntimeServices:
 
             try:
                 response = await client.invoke(effective_request, on_chunk=on_chunk)
+                self.ensure_run_owned()
                 response_text = response.content or (
                     json.dumps(response.outputs, ensure_ascii=False)
                     if response.outputs else ""
@@ -239,6 +258,7 @@ class WorkflowNode(ABC, Generic[NodeInputT, NodeDataT]):
         async def wrapped(state: dict[str, Any]) -> dict[str, Any]:
             # SDK 在调用业务代码前先记录 attempt 和 RUNNING，进程崩溃时仍可追踪。
             task_id, run_id = str(state["task_id"]), str(state["run_id"])
+            services.ensure_run_owned()
             execution_id, attempt = services.storage.start_node(run_id, self.step.code, self.version)
             services.storage.set_status(task_id, run_id, "RUNNING", self.step.code)
             services.event(task_id, run_id, "node_started", node_name=self.step.code, status="RUNNING", payload={"attempt": attempt, "name": self.step.name})
@@ -254,7 +274,13 @@ class WorkflowNode(ABC, Generic[NodeInputT, NodeDataT]):
             )
             try:
                 context.raise_if_cancelled()
-                result = self.execute(context, self._input(state))
+                node_input = self._input(state)
+                if inspect.iscoroutinefunction(self.execute):
+                    result = await self.execute(context, node_input)
+                else:
+                    # Legacy sync nodes run outside ARQ's event loop. I/O-heavy
+                    # business nodes should still prefer async def execute().
+                    result = await asyncio.to_thread(self.execute, context, node_input)
                 if inspect.isawaitable(result):
                     result = await result
                 if inspect.isasyncgen(result):
@@ -278,10 +304,19 @@ class WorkflowNode(ABC, Generic[NodeInputT, NodeDataT]):
                         raise TypeError("streaming node must yield one final NodeOutput")
                     result = final_output
                 elif inspect.isgenerator(result):
-                    # 同步生成器也受支持，适合纯计算节点；耗时 I/O 仍应使用 async
-                    # generator，避免阻塞 ARQ 的事件循环。
+                    # Pull every sync-generator item in a worker thread so a slow
+                    # producer cannot block unrelated ARQ jobs.
                     final_output = None
-                    for item in result:
+                    sentinel = object()
+                    def next_item():
+                        try:
+                            return next(result)
+                        except StopIteration:
+                            return sentinel
+                    while True:
+                        item = await asyncio.to_thread(next_item)
+                        if item is sentinel:
+                            break
                         if isinstance(item, NodeStreamChunk):
                             await self._publish_stream_chunk(services, context, item)
                         elif isinstance(item, NodeOutput):
@@ -298,6 +333,7 @@ class WorkflowNode(ABC, Generic[NodeInputT, NodeDataT]):
                     result = final_output
                 if not isinstance(result, NodeOutput):
                     result = NodeOutput(data=result)
+                services.ensure_run_owned()
                 update = dict(result.state_update)
                 data = self._data_dict(result.data)
                 if self.output_fields:
@@ -327,6 +363,10 @@ class WorkflowNode(ABC, Generic[NodeInputT, NodeDataT]):
             except GraphInterrupt:
                 services.storage.wait_node(execution_id)
                 services.event(task_id, run_id, "workflow_interrupt", node_name=self.step.code, status="WAITING_USER", payload={"name": self.step.name})
+                raise
+            except WorkflowRunLockLost:
+                # A replacement worker now owns the run. The stale worker must not
+                # write a misleading node failure or notify external systems.
                 raise
             except Exception as exc:
                 services.storage.finish_node(execution_id, error=exc)

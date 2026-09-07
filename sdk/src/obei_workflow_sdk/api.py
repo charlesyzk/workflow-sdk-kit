@@ -54,6 +54,12 @@ def create_workflow_router(runtime: Any, *, prefix: str = "/api/v1") -> APIRoute
             raise HTTPException(status_code=404, detail="task not found")
         return runtime.storage.trace(task_id)
 
+    @router.get("/tasks/{task_id}/execution-bindings")
+    def get_execution_bindings(task_id: str):
+        if runtime.storage.get_task(task_id) is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        return {"items": runtime.storage.execution_bindings(task_id)}
+
     @router.get("/artifacts/{artifact_id}")
     def get_artifact(artifact_id: str):
         artifact = runtime.storage.get_artifact(artifact_id)
@@ -114,10 +120,17 @@ def create_workflow_router(runtime: Any, *, prefix: str = "/api/v1") -> APIRoute
             """持续产生 SSE frame；空闲时发送注释心跳防止代理关闭连接。"""
             nonlocal db_cursor, stream_cursor
             while True:
-                rows = await asyncio.to_thread(runtime.storage.events_after, task_id, db_cursor)
-                for row in rows:
-                    db_cursor = row["event_seq"]
-                    yield f"id: {db_cursor}\nevent: {row['event_type']}\ndata: {json.dumps(row, ensure_ascii=False)}\n\n"
+                # Redis tail was captured before replay, so it buffers events
+                # created while every database page is drained.
+                while True:
+                    rows = await asyncio.to_thread(
+                        runtime.storage.events_after, task_id, db_cursor
+                    )
+                    for row in rows:
+                        db_cursor = row["event_seq"]
+                        yield f"id: {db_cursor}\nevent: {row['event_type']}\ndata: {json.dumps(row, ensure_ascii=False)}\n\n"
+                    if len(rows) < 1000:
+                        break
                 messages = await bus.read(task_id, stream_cursor, runtime.settings.event_stream_block_ms)
                 if not messages:
                     yield ": heartbeat\n\n"

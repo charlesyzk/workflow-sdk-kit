@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$OutputDirectory = "dist",
     [switch]$SkipZip
 )
@@ -81,6 +81,7 @@ Get-ChildItem -LiteralPath $sdkSource -Force | ForEach-Object {
 $sdkDocsOutput = Join-Path $projectOutput "docs\sdk"
 New-Item -ItemType Directory -Force -Path $sdkDocsOutput | Out-Null
 $sdkDocuments = @(
+    "CURRENT_STATUS.md",
     "TEMPLATE_PROJECT.md",
     "SDK_FEATURES.md",
     "BUILD_FIRST_WORKFLOW.md",
@@ -148,7 +149,8 @@ foreach ($directory in $generatedDirectories) {
     }
     Remove-Item -LiteralPath $checkedPath -Recurse -Force
 }
-Get-ChildItem -LiteralPath $projectOutput -File -Recurse -Force -Include "*.pyc", "*.pyo" |
+Get-ChildItem -LiteralPath $projectOutput -File -Recurse -Force |
+    Where-Object { $_.Extension -in ".pyc", ".pyo" } |
     ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
 
 $sdkVersionLine = Get-Content -LiteralPath (Join-Path $sdkSource "pyproject.toml") |

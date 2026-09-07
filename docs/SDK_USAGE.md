@@ -853,7 +853,10 @@ QUEUED → RUNNING → SUCCEEDED
                  → CANCELLED
 ```
 
-只有 `FAILED` 任务可以调用 retry。SDK 沿用原 Run 和最近 Checkpoint恢复本地执行；远端任务系统使用新的 Binding 和重试序号，避免重启已经终态的远端任务。
+只有 `FAILED` 任务可以调用 retry。SDK 沿用原 Run 和最近 Checkpoint 恢复本地执行；
+远端任务系统使用新的 Binding 和重试序号，避免重启已经终态的远端任务。Binding
+表保留 `local_run_id + retry_seq + parent_binding_id + external_task_id` 的完整一对多历史；
+新远端任务进入 Running 后，SDK 会补发本地仍为成功的 Checkpoint 步骤，再继续失败节点。
 
 节点异常会保存异常类型和消息，不保存不可序列化的 Python 对象。
 

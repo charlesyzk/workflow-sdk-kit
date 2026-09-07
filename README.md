@@ -70,6 +70,7 @@ dist/                              生成产物，不提交版本库
 
 建议按顺序阅读：
 
+- [当前状态与整体设计](docs/CURRENT_STATUS.md)
 - [完整模板交付说明](docs/TEMPLATE_PROJECT.md)
 - [SDK 功能说明](docs/SDK_FEATURES.md)
 - [从零实现四环节工作流](docs/BUILD_FIRST_WORKFLOW.md)

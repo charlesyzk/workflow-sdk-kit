@@ -59,7 +59,10 @@ from obei_workflow_sdk import Workflow, WorkflowNode, NodeOutput
 - 把 Task/Run 收口为 `FAILED`。
 
 用户调用重试接口后，工作流从持久 Checkpoint 恢复。外部写操作仍应由业务节点
-使用自己的幂等键，通常可组合 `ctx.run_id`、`ctx.node_code` 和 `ctx.attempt`。
+使用自己的稳定幂等键，通常组合 `ctx.run_id`、`ctx.node_code` 和业务操作 ID；
+循环节点还应加入稳定的迭代 ID。`ctx.attempt` 只用于审计，不能放进业务幂等键，
+否则 Checkpoint 重试会生成新键并重复执行外部副作用。远端任务重试产生的新
+`taskId` 也不能作为业务幂等键的一部分，本地 operation key 在 Binding 切换后保持不变。
 
 ## 4. 自定义实时输出
 

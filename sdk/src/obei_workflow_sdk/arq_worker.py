@@ -6,10 +6,10 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from arq import Retry, func
+from arq import Retry, cron, func
 from arq.connections import RedisSettings
 
-from .execution_task import ExecutionTaskApiError, dispatch_execution_outbox
+from .execution_task import ExecutionTaskApiError, dispatch_execution_outbox, pending_execution_task_ids
 from .run_lock import WorkflowRunLocked, WorkflowRunLockLost
 
 
@@ -77,6 +77,21 @@ def create_execution_sync_worker_settings(
             )
             raise Retry(defer=delay) from exc
 
+    async def scan_pending(ctx: dict[str, Any]):
+        """Recover durable Outbox rows whose Redis wake-up was lost."""
+        storage = storage_factory()
+        task_ids = await asyncio.to_thread(pending_execution_task_ids, storage)
+        results = []
+        for task_id in task_ids:
+            try:
+                results.append(await asyncio.to_thread(
+                    dispatch_execution_outbox, storage, settings, task_id
+                ))
+            except ExecutionTaskApiError:
+                # The row now owns its retry deadline; the next scan will retry it.
+                continue
+        return {"scanned": len(task_ids), "results": results}
+
     class WorkerSettings:
         # max_tries 覆盖网络异常、429 和 5xx；不可重试 4xx 会由派发器直接把
         # Outbox 行标记 FAILED，不会反复进入 ARQ Retry。
@@ -88,6 +103,7 @@ def create_execution_sync_worker_settings(
                 keep_result=0,
             )
         ]
+        cron_jobs = [cron(scan_pending, second={0, 15, 30, 45}, run_at_startup=True)]
         redis_settings = RedisSettings.from_dsn(settings.redis_url)
         queue_name = settings.arq_execution_sync_queue
         max_jobs = settings.arq_execution_sync_max_jobs
