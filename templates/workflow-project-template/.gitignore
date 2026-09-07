@@ -1,0 +1,12 @@
+.env
+.venv/
+.runtime/
+logs/
+workflow.db
+workflow.db-shm
+workflow.db-wal
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+dist/

@@ -1,0 +1,17 @@
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+.env
+dist/
+integration-results/
+
+# 维护者本地参考材料（不进仓库）
+reference/
+
+# 个人写给 AI agent 的项目说明（不公开）
+AGENTS.md

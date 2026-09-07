@@ -1,0 +1,40 @@
+[
+  {
+    "stepCode": "validate_input",
+    "name": "校验输入",
+    "stepType": "Reasoning",
+    "dependsOn": [],
+    "needConfirmation": false,
+    "exceptionStrategy": null
+  },
+  {
+    "stepCode": "prepare_context",
+    "name": "准备上下文",
+    "stepType": "Reasoning",
+    "dependsOn": [
+      "validate_input"
+    ],
+    "needConfirmation": false,
+    "exceptionStrategy": null
+  },
+  {
+    "stepCode": "generate_draft",
+    "name": "流式生成草稿",
+    "stepType": "Reasoning",
+    "dependsOn": [
+      "prepare_context"
+    ],
+    "needConfirmation": false,
+    "exceptionStrategy": null
+  },
+  {
+    "stepCode": "polish_answer",
+    "name": "非流式润色回答",
+    "stepType": "Reasoning",
+    "dependsOn": [
+      "generate_draft"
+    ],
+    "needConfirmation": false,
+    "exceptionStrategy": null
+  }
+]

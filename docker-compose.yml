@@ -1,0 +1,73 @@
+services:
+  mysql:
+    # 仅本地独立集成测试需要。外部 TiDB 场景不启用该 profile，也不会拉取镜像。
+    image: mysql:8.4
+    profiles: ["local-db"]
+    environment:
+      MYSQL_DATABASE: workflow
+      MYSQL_USER: workflow
+      MYSQL_PASSWORD: workflow
+      MYSQL_ROOT_PASSWORD: root-workflow
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - workflow-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot-workflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - workflow-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    env_file: ${WORKFLOW_ENV_FILE:-.env}
+    command: ["python", "-m", "starter_app.migrate"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+        required: false
+
+  api:
+    build: .
+    env_file: ${WORKFLOW_ENV_FILE:-.env}
+    ports: ["8090:8090"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    # 工作流推进与外部同步分队列，避免远端 HTTP 延迟占用 LangGraph 并发槽位。
+    build: .
+    env_file: ${WORKFLOW_ENV_FILE:-.env}
+    command: ["arq", "starter_app.worker.WorkflowWorkerSettings"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker-sync:
+    build: .
+    env_file: ${WORKFLOW_ENV_FILE:-.env}
+    command: ["arq", "starter_app.worker.ExecutionSyncWorkerSettings"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  workflow-mysql:
+  workflow-redis:

@@ -1,0 +1,17 @@
+[project]
+name = "obei-workflow-starter"
+version = "0.1.0"
+description = "Runnable starter service for obei-workflow-sdk"
+requires-python = ">=3.11"
+dependencies = [
+  "obei-workflow-sdk==0.1.0",
+  "pydantic-settings>=2.8,<3",
+  "uvicorn>=0.34,<1",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

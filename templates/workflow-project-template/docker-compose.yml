@@ -1,0 +1,18 @@
+services:
+  redis:
+    # 模板只在容器中启动无状态基础设施；API 和 Worker 直接运行本地源码，修改
+    # 工作流后无需重建镜像。生产环境应改用团队维护的 Redis 服务。
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - workflow-template-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+volumes:
+  workflow-template-redis:
