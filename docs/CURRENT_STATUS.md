@@ -215,7 +215,30 @@ SQLite、InlineDispatcher 和 NullTaskSystemAdapter，不需要真实 Redis、�
 
 ## 11. 最近完成的优化
 
-本轮完成：
+### 0.3.3（2026-09）
+
+- LLM 空正文警告：模型返回「正文为空但推理非空」时发 `llm_empty_content` 事件
+  （推理型模型把 max_tokens 额度全花在 reasoning 上的场景），不做自动回退。
+
+### 0.3.2（2026-09）
+
+- 驳回回环 + 动态步骤（方案 C）：`add_conditional_edges(exclude_from_export=...)`
+  让回环边只进运行时图（注册 JSON 保持无环、无需重新注册）；节点第 N 次执行自动
+  以 `{stepCode}_r{N}` + definition 上报，远端按「未知 stepCode + definition」自动
+  创建动态步骤，同一 taskId 内承载多轮；
+- `HumanGateNode` 拆出 `interrupt_payload()` 钩子；人工门恢复复用 WAITING_USER
+  执行记录（attempt 不再误增）；动态步骤 dependsOn 在节点开始时一次算定（避免自依赖）；
+- content_review 示例：REJECT=回环重跑、新增 CLOSE=关闭、max_rounds=3、演示页 4 按钮。
+
+### 0.3.1（2026-09）
+
+- 条件分支 SKIPPED 对账：任务成功前把未走到的静态分支步骤上报 `Skipped`，解决
+  远端「任务进入 Success 前所有步骤必须 Success/Skipped」的 409 卡死；
+- 新增 examples/content_review 三路分支示例（浏览器演示页 + 单测 + 注册 JSON）；
+- 交付模板与启动脚本补 UTF-8 BOM，PowerShell 5.1/7 通用；
+- 修正 4 个依赖方 pyproject 的 SDK 版本钉死。
+
+### 早期（0.3.0 前）
 
 - 增加节点边界租约校验，阻止失锁 Worker 继续落库；
 - 同步节点和同步 generator 在线程执行，避免阻塞 ARQ loop；
@@ -231,8 +254,9 @@ SQLite、InlineDispatcher 和 NullTaskSystemAdapter，不需要真实 Redis、�
 - 修正业务副作用幂等文档及 Starter SDK 版本；
 - 新增对应离线回归测试并重新生成交付 ZIP。
 
-验证结果：完整源码测试 34 项通过，生成后的交付模板测试 18 项通过，Python 编译检查
-通过。当前交付物为 `dist/workflow-project-template.zip`。
+验证结果：完整源码测试 44 项通过（0.3.3），交付模板已重新生成
+`dist/workflow-project-template.zip`；驳回回环已通过生产任务系统实测（同 taskId 多轮、
+终态 Success）。
 
 ## 12. 当前边界和后续建议
 

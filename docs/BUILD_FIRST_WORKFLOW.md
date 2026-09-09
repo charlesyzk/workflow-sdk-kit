@@ -452,9 +452,10 @@ class PolishAnswerNode(WorkflowNode[PolishInput, PolishOutput]):
             "请润色草稿，保持事实不变，输出简洁、完整的最终中文回答。",
             {"draft": node_input.draft},
             stage="answer_polish",
-            # 参数原样透传给 OpenAI-compatible 供应商。qwen3 系列在简单润色场景
-            # 可以关闭深度思考，并限制最大输出，避免非流式请求长期等待。
-            provider_options={"enable_thinking": False, "max_tokens": 512},
+            # 参数原样透传给 OpenAI-compatible 供应商。推理型模型（如
+            # deepseek-v4-flash）的 reasoning 也计入 max_tokens，限得太小会把
+            # 正文挤空；这里只限制总输出长度并留足余量。
+            provider_options={"max_tokens": 2048},
         )
 
         return NodeOutput(
@@ -482,10 +483,15 @@ class PolishAnswerNode(WorkflowNode[PolishInput, PolishOutput]):
 - 完整调用仍写入模型审计表；
 - 最终 Artifact 将写入 Task 的 `final_artifact_id`。
 
-`provider_options` 会原样并入供应商请求体。上例中的 `enable_thinking` 是
-qwen3 系列支持的参数，适合无需深度推理的润色环节；如果使用的模型不支持该
-字段，请删除它或换成该供应商文档规定的等价参数。`max_tokens` 同样受具体模型
-约束。它们只是模型参数，节点仍然是明确的 `stream=False` 非流式调用。
+`provider_options` 会原样并入供应商请求体，节点仍然是明确的 `stream=False` 非流式调用。
+
+推理型模型的三个注意点：
+
+- `max_tokens` 通常**包含 reasoning（思考）token**：deepseek-v4-flash 等模型可能把
+  额度全花在思考上，导致正文为空。SDK 检测到「正文为空但推理非空」时会发
+  `llm_empty_content` 警告事件（不做自动回退），此时应调大 `max_tokens`。
+- `enable_thinking` 是 qwen 系列专有参数，其他模型请删除或换用其文档规定的等价参数。
+- 供应商参数仅对当前模型有效，换模型时需要重新核对。
 
 本示例使用同一个 OpenAI-compatible Adapter 演示流式和非流式两种直接模型模式，
 因此只需要一组模型配置。Dify 是独立应用协议，不再使用
@@ -561,6 +567,9 @@ EXECUTION_TASK_ENABLED=false
 ```
 
 密码中的 `@`、`%`、`:` 等 URL 保留字符需要编码。
+
+本地开发没有 MySQL/TiDB 时，可以先用 SQLite 起步（示例项目的 `.env` 即
+`sqlite:///./simple.db`）；生产环境再换成 MySQL/TiDB 连接串。
 
 `EXECUTION_TASK_ENABLED=false` 只关闭远端 Binding/Outbox，不会关闭：
 
@@ -1064,7 +1073,20 @@ yield NodeOutput(data=...)
 
 检查 Outbox `last_error`，确认四个远端步骤都已按依赖顺序成功，并且最终 Task Status 已投递。
 
-## 27. 示例文件索引
+## 27. 进阶：人工门、条件分支与驳回回环
+
+本文的四环节是线性工作流。实际业务往往需要：
+
+- **人工审批**：`HumanGateNode` 暂停任务等待决策，见 `SDK_USAGE.md` 第 8 章；
+- **条件分支**：`add_conditional_edges(..., path_map={...})` 按路由键走不同节点；
+- **驳回回环**：驳回后回到前序节点重跑（SDK 0.3.2 起），SDK 自动以动态步骤
+  `{stepCode}_r{N}` 上报远端、同一任务内多轮留痕，见 `SDK_USAGE.md` 第 8.1 节。
+
+完整可运行示例（含浏览器演示页）：
+
+- 三路分支 + 人工门 + 驳回回环：[examples/content_review](../examples/content_review)
+
+## 28. 示例文件索引
 
 - 四环节工作流：[workflow.py](../examples/simple_workflow/src/simple_app/workflow.py)
 - Runtime 组装：[container.py](../examples/simple_workflow/src/simple_app/container.py)

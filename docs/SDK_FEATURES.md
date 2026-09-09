@@ -59,6 +59,8 @@ python -m pip install .\sdk
 | 状态持久化 | Task、Run、Checkpoint、NodeExecution | 配置 TiDB/MySQL |
 | 产物管理 | Artifact 版本、哈希、最终产物 | 决定产物内容和类型 |
 | 人工确认 | `HumanGateNode`、Decision、恢复 | 定义允许的决定和审批产物 |
+| 驳回回环 | 动态步骤（`{code}_r{N}` + definition）、`exclude_from_export`、`max_rounds` | 画回环边、定义决策值 |
+| 分支对账 | 未走到的静态步骤自动上报 `Skipped` | — |
 | 异步执行 | ARQ 工作流 Worker | 启动 Worker 和 Redis |
 | 并发保护 | Redis Run 租约锁 | 配置 TTL 与续租周期 |
 | 事件订阅 | 数据库回放 + Redis Stream + SSE | 前端消费事件 |
@@ -225,6 +227,11 @@ SDK 自动：
 
 远端注册 JSON 中，`HumanGateNode` 自动导出为 `needConfirmation: true`。
 
+支持**驳回回环**（0.3.2 起）：`REJECT` 可路由回前序节点重跑，SDK 自动以
+`{stepCode}_r{N}` 动态步骤上报远端（同一 taskId 内多轮留痕、审计完整）；回环边用
+`exclude_from_export` 标记后不进注册清单，因此**无需重新注册**。完整用法见
+[SDK_USAGE.md](SDK_USAGE.md) 8.1 节。
+
 ## 8. ARQ 异步执行
 
 API 只做同步校验、创建 Task/Run 和发送消息，然后返回 HTTP 202。实际执行由两个独立 Worker 完成：
@@ -257,6 +264,11 @@ TASK_STATUS Success/Failed/WaitingUser
 - 一个本地 Run 可以按 `retry_seq` 保留多个 Binding/远端 taskId；新 Binding 会先
   补发 Checkpoint 中已经成功的远端步骤，再从失败节点继续。
 - execution_sync Worker 每 15 秒扫描一次到期的 PENDING Outbox，补偿丢失的 Redis 唤醒。
+- 条件分支未走到的静态步骤在任务成功前自动上报 `Skipped`（0.3.1 起），满足远端
+  「全部步骤终态才允许任务 Success」的约束；
+- 回环重跑的轮次以**动态步骤**上报（未知 stepCode + definition 自动创建，0.3.2 起）；
+- 多宿主共用 Redis 时，`ARQ_WORKFLOW_QUEUE` / `ARQ_EXECUTION_SYNC_QUEUE` 必须按宿主区分，
+  否则 Worker 会抢到其他宿主的任务。
 
 使用者必须先把 SDK 生成的步骤 JSON登记到远端，再把远端签发的 Key 填入：
 

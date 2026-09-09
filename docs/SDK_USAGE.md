@@ -405,6 +405,47 @@ Content-Type: application/json
 
 如果 Gate 关联 Artifact，SDK 会校验 Artifact 归属、版本和哈希，防止用户确认已经过期的内容。
 
+### 8.1 驳回回环与动态步骤（0.3.2 起）
+
+「驳回后回到前序节点重跑」是常见需求，但远端任务系统的步骤终态
+（Success/Failed/Skipped）不可回退。SDK 用**动态步骤回环**解决：
+
+1. 图里画回环边，并用 `exclude_from_export` 让回环边**只进运行时图、不进注册清单**
+   （注册 JSON 必须是无环 DAG，因此**不需要重新注册**）：
+
+```python
+graph.add_conditional_edges(
+    "human_review",
+    route_after_review,
+    path_map={
+        "CONFIRM": "polish_final",
+        "REJECT":  "generate_draft",   # 回环：驳回后重新生成
+        "REVISE":  "revise_draft",
+        "CLOSE":   "reject_close",
+    },
+    exclude_from_export={"generate_draft"},
+)
+```
+
+2. 节点第 N 次执行时，SDK 自动用 `{stepCode}_r{N}` 作为远端步骤码，并在
+   STEP_START/STATUS 携带 `definition`（名称带「第 N 轮」、`dependsOn` 指向前一轮
+   步骤）。远端按「未知 stepCode + definition」自动创建动态步骤，同一 taskId 内
+   承载多轮，每轮完整留痕。
+
+3. 建议把「关闭」单列为决策值，并用 `max_rounds` 限制回环上限：
+
+```python
+class ReviewGate(HumanGateNode):
+    allowed_decisions = ("CONFIRM", "REJECT", "REVISE", "CLOSE")
+    max_rounds = 3   # 达到上限的轮次不再提供 REJECT，防无限回环
+    # 重写 interrupt_payload()：按 state["round"] 裁剪 allowed_decisions；
+    # execute()：decision == "REJECT" 时 round+1 写回 state
+```
+
+远端动态步骤约束：任务终态后不可创建；同任务内 stepCode 唯一；dependsOn 引用的
+步骤必须已存在；同一动态步骤的 definition 前后必须完全一致。完整可运行示例见
+[content_review](../examples/content_review)。
+
 ## 9. 使用大模型
 
 ### 9.1 OpenAI-compatible
@@ -457,6 +498,14 @@ answer = await ctx.llm.chat(
 
 SDK 不会为直接模型虚构 `conversation_id`；请求中的完整 `messages` 会进入模型调用
 审计。需要跨节点或重试保留历史时，应把 `history` 声明为工作流 State 字段。
+
+#### 推理型（reasoning）模型注意
+
+- `max_tokens` 通常**包含 reasoning（思考）token**：deepseek-v4-flash 等模型可能把
+  额度全花在思考上，导致正文为空。SDK 检测到「正文为空但推理非空」时会发
+  `llm_empty_content` 警告事件（不做自动回退），此时应调大 `max_tokens`。
+- `enable_thinking` 是 qwen 系列专有参数，其他模型请删除或换用其文档规定的等价参数。
+- `provider_options` 原样透传给供应商，SDK 不做模型相关校验。
 
 ### 9.2 Dify 多 App Registry
 
@@ -764,6 +813,17 @@ EXECUTION_TASK_OUTPUT_MAX_BYTES=8192
 
 远端必须预先注册与本地 `TaskStep.code` 一致的步骤，否则步骤接口会拒绝未知 `stepCode`。
 
+条件分支与多轮执行的远端对账：
+
+- 未走到的**静态分支步骤**会在任务成功前自动上报 `Skipped`（0.3.1 起），否则远端
+  会因这些步骤停留在 Pending 而拒绝终态 Success。
+- 驳回回环的重跑轮次以**动态步骤**（`{code}_r{N}` + definition）上报，见 8.1，
+  不需要重新注册。
+- **多宿主共用 Redis 时必须区分队列名**：多个独立宿主（各自一套 API/Worker）连接
+  同一个 Redis 时，默认 `ARQ_WORKFLOW_QUEUE=workflow` 会让 Worker 抢到其他宿主的
+  任务并报 `unknown workflow_type` 卡 QUEUED。每个宿主配置不同的
+  `ARQ_WORKFLOW_QUEUE` / `ARQ_EXECUTION_SYNC_QUEUE`。
+
 ## 15. 生成远端注册 JSON
 
 ### 15.1 Python API
@@ -913,8 +973,8 @@ python -m pytest starter/tests -q
 | `WORKFLOW_RUN_LOCK_TTL_SECONDS` | 90 | Run 锁租约 |
 | `WORKFLOW_RUN_LOCK_RENEW_SECONDS` | 30 | Run 锁续租间隔，必须小于 TTL |
 | `ARQ_JOB_TIMEOUT_SECONDS` | 600 | 单个 ARQ Job 超时 |
-| `ARQ_WORKFLOW_QUEUE` | workflow | 工作流队列 |
-| `ARQ_EXECUTION_SYNC_QUEUE` | execution_sync | 任务系统同步队列 |
+| `ARQ_WORKFLOW_QUEUE` | workflow | 工作流队列（多宿主共用 Redis 时各宿主必须不同） |
+| `ARQ_EXECUTION_SYNC_QUEUE` | execution_sync | 任务系统同步队列（多宿主共用 Redis 时各宿主必须不同） |
 | `ARQ_WORKFLOW_MAX_JOBS` | 4 | 工作流 Worker 并发 |
 | `ARQ_EXECUTION_SYNC_MAX_JOBS` | 2 | 同步 Worker 并发 |
 | `EVENT_STREAM_PREFIX` | workflow | Redis Stream 前缀 |
@@ -958,7 +1018,11 @@ python -m pytest starter/tests -q
 
 ### 本地成功，但远端任务仍为 Running
 
-检查 `obei_workshop_task_system_outbox` 的 FAILED 行和 `last_error`。常见原因是远端步骤依赖没有全部成功，或者远端固定模板与本地图不一致。
+检查 `obei_workshop_task_system_outbox` 的 FAILED 行和 `last_error`。常见原因：
+
+- 条件分支未走到的静态步骤停留在 Pending（确认 SDK ≥ 0.3.1 的 Skipped 对账已生效）；
+- 动态步骤（`{code}_r{N}`）的 definition 前后不一致，或 dependsOn 指向了自身 / 未完成步骤；
+- 多宿主共用 Redis 但队列名没区分，任务被其他宿主的 Worker 抢走（`unknown workflow_type`）。
 
 ### 注册 JSON 导出失败，提示需要 path_map
 
