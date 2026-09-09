@@ -1,6 +1,6 @@
 [project]
 name = "obei-workflow-sdk"
-version = "0.3.0"
+version = "0.3.1"
 description = "A traceable workflow SDK with direct-model and durable Dify application calls"
 requires-python = ">=3.11"
 dependencies = [

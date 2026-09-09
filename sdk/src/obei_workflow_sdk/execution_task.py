@@ -137,7 +137,7 @@ class ExecutionTaskAdapter:
                 key = f"step-start:{binding.id}:{step_code}"
             else:
                 event_type = "STEP_STATUS"
-                remote = "Success" if status == "SUCCEEDED" else "Failed"
+                remote = {"SUCCEEDED": "Success", "FAILED": "Failed", "SKIPPED": "Skipped"}.get(status, "Failed")
                 body = {"status": remote, "output": compact_output(payload or {}, self.settings.execution_task_output_max_bytes)}
                 key = f"step-status:{binding.id}:{step_code}:{attempt}:{remote}"
             self._enqueue(db, binding, event_type, step_code, body, key)

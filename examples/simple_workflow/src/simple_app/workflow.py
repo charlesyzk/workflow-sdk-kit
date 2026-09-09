@@ -217,12 +217,10 @@ class PolishAnswerNode(WorkflowNode[PolishInput, PolishOutput]):
             "请润色草稿，保持事实不变，输出简洁、完整的最终中文回答。",
             {"draft": node_input.draft},
             stage="answer_polish",
-            # 这是供应商透传参数，不会改变 SDK 的 stream=False 语义。
-            # qwen3 系列默认可能先执行较长时间的深度思考；对于只做文字润色的
-            # 演示节点没有必要启用该能力。关闭思考并限制输出长度，可以让阻塞式
-            # 请求稳定地在网关超时前返回。其他 OpenAI-compatible 模型如果不支持
-            # enable_thinking，应删除该字段，只保留模型支持的参数。
-            provider_options={"enable_thinking": False, "max_tokens": 512},
+            # 供应商透传参数，不改变 SDK 的 stream=False 语义。deepseek-v4-flash
+            # 这类推理型模型的 reasoning 也计入 max_tokens，512 太小会把正文挤空，
+            # 因此这里只限制总输出长度并留足余量，保证非流式正文完整返回。
+            provider_options={"max_tokens": 2048},
         )
         return NodeOutput(
             data=PolishOutput(answer=answer),

@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 function Get-WorkflowProjectRoot {
     # common.ps1 位于 <project>/scripts；Resolve-Path 会返回规范绝对路径，避免脚本

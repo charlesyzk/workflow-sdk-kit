@@ -1,0 +1,60 @@
+[
+  {
+    "stepCode": "analyze_request",
+    "name": "分析需求",
+    "stepType": "Reasoning",
+    "dependsOn": [],
+    "needConfirmation": false,
+    "exceptionStrategy": null
+  },
+  {
+    "stepCode": "generate_draft",
+    "name": "生成初稿",
+    "stepType": "Reasoning",
+    "dependsOn": [
+      "analyze_request"
+    ],
+    "needConfirmation": false,
+    "exceptionStrategy": null
+  },
+  {
+    "stepCode": "human_review",
+    "name": "人工复核初稿",
+    "stepType": "Reasoning",
+    "dependsOn": [
+      "generate_draft"
+    ],
+    "needConfirmation": true,
+    "exceptionStrategy": null
+  },
+  {
+    "stepCode": "polish_final",
+    "name": "润色定稿",
+    "stepType": "Reasoning",
+    "dependsOn": [
+      "human_review"
+    ],
+    "needConfirmation": false,
+    "exceptionStrategy": null
+  },
+  {
+    "stepCode": "revise_draft",
+    "name": "按反馈修订",
+    "stepType": "Reasoning",
+    "dependsOn": [
+      "human_review"
+    ],
+    "needConfirmation": false,
+    "exceptionStrategy": null
+  },
+  {
+    "stepCode": "reject_close",
+    "name": "驳回关闭",
+    "stepType": "Reasoning",
+    "dependsOn": [
+      "human_review"
+    ],
+    "needConfirmation": false,
+    "exceptionStrategy": null
+  }
+]

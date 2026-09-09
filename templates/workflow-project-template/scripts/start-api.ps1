@@ -1,4 +1,4 @@
-param([int]$Port = 8090)
+﻿param([int]$Port = 8090)
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")

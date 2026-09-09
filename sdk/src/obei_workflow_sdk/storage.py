@@ -601,6 +601,14 @@ class SQLAlchemyWorkflowStorage:
                 } for e in events],
             }
 
+    def successful_node_codes(self, run_id: str) -> set[str]:
+        """返回该 Run 已成功的节点 code 集合，用于对账远端分支步骤的 Skipped 状态。"""
+        with self.session_factory() as db:
+            return set(db.scalars(select(WorkflowNodeExecution.node_name).where(
+                WorkflowNodeExecution.run_id == run_id,
+                WorkflowNodeExecution.status == "SUCCEEDED",
+            )).all())
+
     def execution_bindings(self, task_id: str) -> list[dict[str, Any]]:
         """Return the complete local-run to remote-task retry history."""
         with self.session_factory() as db:

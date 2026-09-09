@@ -15,3 +15,11 @@ reference/
 
 # 个人写给 AI agent 的项目说明（不公开）
 AGENTS.md
+
+# 本机验证/演示脚本与会话交接 prompt（会话内生成，不入库）
+/scripts/demo-inline.py
+/scripts/start-example-service.ps1
+/scripts/stop-example-service.ps1
+/scripts/start-content-review.ps1
+/scripts/stop-content-review.ps1
+/HANDOFF_PROMPT.md

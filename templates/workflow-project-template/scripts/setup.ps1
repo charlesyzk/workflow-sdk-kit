@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$PythonCommand = "python",
     [switch]$SkipPipUpgrade
 )

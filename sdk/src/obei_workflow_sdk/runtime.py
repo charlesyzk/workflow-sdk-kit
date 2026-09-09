@@ -107,6 +107,8 @@ class WorkflowRuntime:
             current_node = result.get("current_node") if isinstance(result, dict) else None
             self.storage.set_status(task.id, run.id, status, current_node)
             self.services.event(task.id, run.id, "workflow_finished", node_name=current_node, status=status, payload={})
+            if status == "SUCCEEDED":
+                self._sync_skipped_steps(task.id, run.id, builder)
             self.services.safe_task_status(task.id, status, {"run_id": run.id, "current_node": current_node})
             return {"task_id": task.id, "run_id": run.id, "status": status, "current_node": current_node}
         except (WorkflowRunLocked, WorkflowRunLockLost):
@@ -123,6 +125,27 @@ class WorkflowRuntime:
             self.services.event(task.id, run.id, "workflow_failed", node_name=current_node, status="FAILED", payload={"type": type(exc).__name__, "message": str(exc)})
             self.services.safe_task_status(task.id, "FAILED", {"run_id": run.id, "message": str(exc)})
             raise
+
+    def _sync_skipped_steps(self, task_id: str, run_id: str, builder: WorkflowGraph) -> None:
+        """把未走到的分支步骤标记为 Skipped，使远端终态机放行 Success。
+
+        条件分支把全部可达步骤都注册到远端，但单次运行只执行其中一条分支；其余
+        步骤在远端保持 Pending，会阻塞最终的 TASK_STATUS Success。这里按注册顺序
+        补发 SKIPPED，并且必须在 Success 之前进入 Outbox。
+        """
+        executed = self.storage.successful_node_codes(run_id)
+        for step in builder.registration_definition():
+            code = step["stepCode"]
+            if code not in executed:
+                self.services.safe_step_status(
+                    task_id,
+                    run_id,
+                    code,
+                    step["name"],
+                    "SKIPPED",
+                    0,
+                    {"reason": "branch not taken"},
+                )
 
     def decide(self, task_id: str, decision_key: str, decision: str, feedback: str, actor_id: str, artifact_id: str | None = None, artifact_version: int | None = None, content_hash: str | None = None) -> dict[str, Any]:
         """校验待决 interrupt 与产物版本，保存决定并异步恢复同一个 Run。"""

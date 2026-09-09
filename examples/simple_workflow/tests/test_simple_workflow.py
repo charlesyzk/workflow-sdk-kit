@@ -84,7 +84,7 @@ def test_simple_workflow_executes_and_exports_registration_json(tmp_path: Path):
     assert adapter.stream_flags == [True, False]
     assert adapter.provider_options == [
         {},
-        {"enable_thinking": False, "max_tokens": 512},
+        {"max_tokens": 2048},
     ]
     invocations = storage.llm_invocations(accepted["task_id"])
     assert [item["stream"] for item in invocations] == [True, False]
@@ -125,3 +125,40 @@ def test_simple_workflow_executes_and_exports_registration_json(tmp_path: Path):
             "exceptionStrategy": None,
         },
     ]
+
+
+def test_streaming_node_emits_tokens_non_streaming_does_not(tmp_path: Path):
+    """显式验证：流式 LLM 节点发 llm_token，非流式节点零 token，两者共存不串台。"""
+    storage = SQLAlchemyWorkflowStorage(f"sqlite:///{tmp_path / 'simple.db'}", create_tables=True)
+    registry = WorkflowRegistry(); registry.register(SimpleLLMWorkflow())
+    adapter = FakeOpenAIAdapter()
+    llms = LLMRegistry(); llms.register(adapter)
+    events = RecordingEventBus()
+    runtime = WorkflowRuntime(
+        storage,
+        registry,
+        InlineDispatcher(),
+        NullTaskSystemAdapter(),
+        llm_registry=llms,
+        event_bus=events,
+    )
+
+    accepted = runtime.submit(
+        "simple_llm_workflow",
+        {"question": "流式与非流式是否兼容？"},
+        "tester",
+    )
+    task = storage.get_task(accepted["task_id"])
+    assert task["status"] == "SUCCEEDED"
+
+    tokens = [p for _, p in events.items if p["type"] == "llm_token"]
+    # 只有流式节点 generate_draft 会产生 token
+    assert tokens, "streaming node should emit llm_token events"
+    assert {p["node_name"] for p in tokens} == {"generate_draft"}
+    # 非流式节点 polish_answer 一个 token 都不产生
+    polish_tokens = [p for _, p in events.items if p["type"] == "llm_token" and p["node_name"] == "polish_answer"]
+    assert polish_tokens == []
+    # 适配器确实分别以 stream=True / stream=False 被调用
+    assert adapter.stream_flags == [True, False]
+    # LLM 审计表记录了流式标记
+    assert [i["stream"] for i in storage.llm_invocations(accepted["task_id"])] == [True, False]

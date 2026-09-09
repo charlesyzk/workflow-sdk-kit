@@ -1,4 +1,4 @@
-param([switch]$KeepRedis)
+﻿param([switch]$KeepRedis)
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")

@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $kitRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $kitRoot
 if (-not (Test-Path -LiteralPath ".env")) {
