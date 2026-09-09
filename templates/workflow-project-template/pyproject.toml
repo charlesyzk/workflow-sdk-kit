@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A ready-to-develop project template powered by the vendored Obei Workflow SDK"
 requires-python = ">=3.11"
 dependencies = [
-  "obei-workflow-sdk==0.3.0",
+  "obei-workflow-sdk==0.3.1",
   "uvicorn>=0.34,<1",
 ]
 
