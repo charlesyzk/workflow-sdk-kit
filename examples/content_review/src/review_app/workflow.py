@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import AsyncIterator, TypedDict
+from typing import Any, AsyncIterator, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -55,6 +55,7 @@ class ReviewState(TypedDict, total=False):
     draft_ref: str
     last_decision: dict
     feedback: str
+    round: int
     answer: str
     reason: str
 
@@ -152,15 +153,33 @@ class ReviewGateInput(BaseModel):
 class ReviewGate(HumanGateNode):
     """第三环节：人工复核。任务在此暂停，等待 API 提交决策后恢复。
 
-    决策值：CONFIRM（通过）/ REJECT（驳回）/ REVISE（修订）。
-    复核人可通过 draft_ref 引用的 Artifact 查看初稿全文。
+    决策值：CONFIRM（通过）/ REJECT（驳回，回环重跑初稿）/ REVISE（修订）/
+    CLOSE（驳回关闭）。复核人可通过 draft_ref 引用的 Artifact 查看初稿全文。
+    REJECT 会把 round+1 并回到 generate_draft；达到 max_rounds 后不再提供 REJECT。
     """
 
     step = TaskStep(code="human_review", name="人工复核初稿", step_type="Reasoning")
     input_model = ReviewGateInput
     input_fields = {"draft": StateField("draft")}
     artifact_ref_field = "draft_ref"
-    allowed_decisions = ("CONFIRM", "REJECT", "REVISE")
+    allowed_decisions = ("CONFIRM", "REJECT", "REVISE", "CLOSE")
+    max_rounds = 3
+
+    def interrupt_payload(
+        self,
+        ctx: NodeContext,
+        node_input: ReviewGateInput,
+    ) -> dict:
+        payload = super().interrupt_payload(ctx, node_input)
+        round_no = int(ctx._state.get("round", 1))
+        payload["round"] = round_no
+        payload["max_rounds"] = self.max_rounds
+        # 达到回环上限后不再提供 REJECT，防止无限驳回死循环。
+        if round_no >= self.max_rounds:
+            payload["allowed_decisions"] = [
+                d for d in self.allowed_decisions if d != "REJECT"
+            ]
+        return payload
 
     def execute(
         self,
@@ -169,20 +188,24 @@ class ReviewGate(HumanGateNode):
     ) -> NodeOutput[dict]:
         outcome = super().execute(ctx, node_input)
         decision = (outcome.state_update or {}).get("last_decision") or {}
-        # 把反馈提升为顶层状态键，便于后续节点用 StateField 声明式读取。
+        round_no = int(ctx._state.get("round", 1))
+        if decision.get("decision") == "REJECT":
+            round_no += 1
+        # 把反馈/轮次提升为顶层状态键，便于后续节点用 StateField 声明式读取。
         return NodeOutput(
             state_update={
                 "last_decision": decision,
                 "feedback": decision.get("feedback", ""),
+                "round": round_no,
             }
         )
 
 
 def route_after_review(state: ReviewState) -> str:
     """按人工决策返回路由键；path_map 负责把键映射到目标节点。"""
-    decision = (state.get("last_decision") or {}).get("decision", "REJECT")
-    if decision not in ("CONFIRM", "REJECT", "REVISE"):
-        return "REJECT"
+    decision = (state.get("last_decision") or {}).get("decision", "CLOSE")
+    if decision not in ("CONFIRM", "REJECT", "REVISE", "CLOSE"):
+        return "CLOSE"
     return decision
 
 
@@ -334,12 +357,17 @@ class RejectCloseNode(WorkflowNode[RejectInput, RejectOutput]):
 
 
 class ContentReviewWorkflow(Workflow):
-    """六节点图：流式生成 + 人工门 + 三路决策分支。"""
+    """六节点图：流式生成 + 人工门 + 四路决策（含 REJECT 回环）。"""
 
     workflow_type = "content_review"
     version = "1.0"
     input_model = ReviewRequest
     state_model = ReviewState
+
+    def initial_state(self, task: Any, run: Any) -> dict[str, Any]:
+        state = super().initial_state(task, run)
+        state["round"] = 1
+        return state
 
     def build(self, graph: WorkflowGraph) -> None:
         graph.add_node("analyze_request", AnalyzeRequestNode())
@@ -356,9 +384,12 @@ class ContentReviewWorkflow(Workflow):
             route_after_review,
             path_map={
                 "CONFIRM": "polish_final",
-                "REJECT": "reject_close",
+                "REJECT": "generate_draft",   # 回环：驳回后重新生成初稿
                 "REVISE": "revise_draft",
+                "CLOSE": "reject_close",
             },
+            # REJECT 是回环边，只作用于运行时图；注册清单必须保持无环 DAG。
+            exclude_from_export={"generate_draft"},
         )
         graph.set_finish_point("polish_final")
         graph.set_finish_point("revise_draft")

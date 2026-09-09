@@ -17,6 +17,7 @@ class TaskSystemAdapter(Protocol):
         status: str,
         attempt: int,
         payload: dict[str, Any] | None = None,
+        definition: dict[str, Any] | None = None,
     ) -> None: ...
 
 
@@ -39,6 +40,7 @@ class DisabledTaskSystemAdapter:
         status: str,
         attempt: int,
         payload: dict[str, Any] | None = None,
+        definition: dict[str, Any] | None = None,
     ) -> None:
         return None
 

@@ -44,7 +44,8 @@ DEMO_PAGE = """<!DOCTYPE html>
   #submit { background: #1f6feb; color: #fff; }
   #confirm { background: #16a34a; color: #fff; }
   #revise { background: #d97706; color: #fff; }
-  #reject { background: #dc2626; color: #fff; }
+  #reject { background: #7c3aed; color: #fff; }
+  #close { background: #6b7280; color: #fff; }
   .panel { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; margin-top: 16px; }
   .panel h2 { font-size: 14px; margin: 0 0 8px 0; color: #334155; }
   #status { font-weight: 600; }
@@ -77,7 +78,8 @@ DEMO_PAGE = """<!DOCTYPE html>
   <div class="row">
     <button id="confirm">✅ 通过（CONFIRM）</button>
     <button id="revise">📝 修订（REVISE）</button>
-    <button id="reject">⛔ 驳回（REJECT）</button>
+    <button id="reject">🔁 驳回重跑（REJECT）</button>
+    <button id="close">🚫 关闭（CLOSE）</button>
   </div>
 </div>
 
@@ -155,7 +157,11 @@ function handle(type, d) {
     decisionKey = d.payload && d.payload.decision_key;
     artifactRef = d.payload && d.payload.artifact_ref;
     document.getElementById('decision').style.display = 'block';
-    setStatus('等待人工决策（decision_key=' + decisionKey + '）');
+    // 达到回环上限时隐藏「驳回重跑」按钮（后端同样会拒绝）。
+    const r = d.payload && d.payload.round;
+    const mr = d.payload && d.payload.max_rounds;
+    document.getElementById('reject').style.display = (r && mr && r >= mr) ? 'none' : '';
+    setStatus('等待人工决策（第' + (r || '?') + '轮，decision_key=' + decisionKey + '）');
     loadDraftForReview();
   } else if (type === 'node_succeeded') {
     setStatus('节点完成：' + d.node_name);
@@ -209,6 +215,7 @@ document.getElementById('submit').addEventListener('click', submitTask);
 document.getElementById('confirm').addEventListener('click', () => decide('CONFIRM'));
 document.getElementById('revise').addEventListener('click', () => decide('REVISE'));
 document.getElementById('reject').addEventListener('click', () => decide('REJECT'));
+document.getElementById('close').addEventListener('click', () => decide('CLOSE'));
 </script>
 </body>
 </html>

@@ -127,18 +127,28 @@ class ExecutionTaskAdapter:
                 self._enqueue(db, binding, "TASK_STATUS", None, {"status": ext, "businessStatus": business, "output": compact_output(payload or {}, self.settings.execution_task_output_max_bytes)}, f"task-status:{binding.id}:{transition}:{status}")
         self._publish(task_id)
 
-    def step_status(self, task_id: str, run_id: str, step_code: str, step_name: str, status: str, attempt: int, payload: dict[str, Any] | None = None) -> None:
-        """将节点开始/终态转换成远端步骤 API 所需的事件。"""
+    def step_status(self, task_id: str, run_id: str, step_code: str, step_name: str, status: str, attempt: int, payload: dict[str, Any] | None = None, definition: dict[str, Any] | None = None) -> None:
+        """将节点开始/终态转换成远端步骤 API 所需的事件。
+
+        回环重跑（attempt>1）时 step_code 已带轮次后缀，definition 非空；远端
+        会按「未知 stepCode + definition」自动创建动态步骤。START/STATUS 必须
+        携带完全一致的 definition，满足远端动态步骤快照一致性校验——definition
+        由节点层一次性算好（含 dependsOn），这里原样透传、不再重复计算。
+        """
         with self.storage.session_factory.begin() as db:
             binding = self._binding(db, task_id, run_id)
             if status == "RUNNING":
                 event_type = "STEP_START"
                 body = {"sessionId": f"{run_id}:{step_code}", "stepInput": {"name": step_name}}
+                if definition is not None:
+                    body["definition"] = definition
                 key = f"step-start:{binding.id}:{step_code}"
             else:
                 event_type = "STEP_STATUS"
                 remote = {"SUCCEEDED": "Success", "FAILED": "Failed", "SKIPPED": "Skipped"}.get(status, "Failed")
                 body = {"status": remote, "output": compact_output(payload or {}, self.settings.execution_task_output_max_bytes)}
+                if definition is not None:
+                    body["definition"] = definition
                 key = f"step-status:{binding.id}:{step_code}:{attempt}:{remote}"
             self._enqueue(db, binding, event_type, step_code, body, key)
         self._publish(task_id)

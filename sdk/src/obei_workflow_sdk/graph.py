@@ -86,6 +86,19 @@ class RuntimeServices:
             response = await adapter.generate(request, on_chunk=on_chunk if request.stream else None)
             self.ensure_run_owned()
             self.storage.finish_llm_invocation(invocation_id, response=response.content, reasoning=response.reasoning, usage=response.usage, provider_request_id=response.provider_request_id)
+            if not response.content and response.reasoning:
+                # 推理型模型可能把 max_tokens 额度全花在 reasoning 上导致正文为空；
+                # 这里只发警告事件提醒宿主排查（如放宽 max_tokens），不做自动回退。
+                self.transient_event(
+                    context.task_id,
+                    "llm_empty_content",
+                    node_name=context.node_code,
+                    stage=stage,
+                    invocation_id=invocation_id,
+                    source="direct_model",
+                    provider=adapter_name,
+                    message="model returned empty content while reasoning is not empty",
+                )
             self.transient_event(context.task_id, "llm_end", node_name=context.node_code, stage=stage, invocation_id=invocation_id, source="direct_model", provider=adapter_name, usage=response.usage)
             return response
         except Exception as exc:
@@ -250,6 +263,24 @@ class WorkflowNode(ABC, Generic[NodeInputT, NodeDataT]):
             return data
         return {"result": data}
 
+    def _remote_step(self, attempt: int) -> tuple[str, str, dict[str, Any] | None]:
+        """折算远端上报用的步骤码/名称/动态定义；attempt>1 视为回环重跑。
+
+        第 1 次执行沿用注册 stepCode；回环重跑用 ``{code}_r{attempt}`` 作为新
+        stepCode 并携带 definition，远端会按「未知 stepCode + definition」自动
+        创建动态步骤，使同一远端任务内可以承载多轮执行。
+        """
+        if attempt <= 1:
+            return self.step.code, self.step.name, None
+        name = f"{self.step.name}（第{attempt}轮）"
+        definition = {
+            "name": name,
+            "stepType": self.step.step_type,
+            "needConfirmation": self.step.need_confirmation or isinstance(self, HumanGateNode),
+            "exceptionStrategy": self.step.exception_strategy,
+        }
+        return f"{self.step.code}_r{attempt}", name, definition
+
     def bind(self, services: RuntimeServices):
         """把业务 ``execute`` 包装成带完整生命周期观测的 LangGraph 节点。"""
         if not hasattr(self, "step") or not self.step.code:
@@ -260,10 +291,22 @@ class WorkflowNode(ABC, Generic[NodeInputT, NodeDataT]):
             task_id, run_id = str(state["task_id"]), str(state["run_id"])
             services.ensure_run_owned()
             execution_id, attempt = services.storage.start_node(run_id, self.step.code, self.version)
+            remote_code, remote_name, remote_definition = self._remote_step(attempt)
+            if remote_definition is not None:
+                # dependsOn 只在节点开始时算一次（此刻自身仍是 RUNNING，天然被排除），
+                # START/STATUS 复用同一份，避免终态上报时取到自身造成自依赖。
+                previous = services.storage.previous_successful_node(run_id, self.step.code)
+                if previous is None:
+                    remote_definition["dependsOn"] = []
+                else:
+                    prev_code, prev_attempt = previous
+                    remote_definition["dependsOn"] = [
+                        prev_code if prev_attempt <= 1 else f"{prev_code}_r{prev_attempt}"
+                    ]
             services.storage.set_status(task_id, run_id, "RUNNING", self.step.code)
             services.event(task_id, run_id, "node_started", node_name=self.step.code, status="RUNNING", payload={"attempt": attempt, "name": self.step.name})
             if self.step.notify_task_system:
-                services.safe_step_status(task_id, run_id, self.step.code, self.step.name, "RUNNING", attempt)
+                services.safe_step_status(task_id, run_id, remote_code, remote_name, "RUNNING", attempt, definition=remote_definition)
             context = NodeContext(
                 services,
                 state,
@@ -358,7 +401,7 @@ class WorkflowNode(ABC, Generic[NodeInputT, NodeDataT]):
                     payload.update({"summary": notification.summary, "output": notification.output})
                 services.event(task_id, run_id, "node_succeeded", node_name=self.step.code, status="SUCCEEDED", artifact_id=primary_artifact, payload=payload)
                 if self.step.notify_task_system:
-                    services.safe_step_status(task_id, run_id, self.step.code, self.step.name, "SUCCEEDED", attempt, payload)
+                    services.safe_step_status(task_id, run_id, remote_code, remote_name, "SUCCEEDED", attempt, payload, definition=remote_definition)
                 return update
             except GraphInterrupt:
                 services.storage.wait_node(execution_id)
@@ -372,7 +415,7 @@ class WorkflowNode(ABC, Generic[NodeInputT, NodeDataT]):
                 services.storage.finish_node(execution_id, error=exc)
                 services.event(task_id, run_id, "node_failed", node_name=self.step.code, status="FAILED", payload={"type": type(exc).__name__, "message": str(exc)})
                 if self.step.notify_task_system:
-                    services.safe_step_status(task_id, run_id, self.step.code, self.step.name, "FAILED", attempt, {"message": str(exc)})
+                    services.safe_step_status(task_id, run_id, remote_code, remote_name, "FAILED", attempt, {"message": str(exc)}, definition=remote_definition)
                 raise
 
         return wrapped
@@ -415,13 +458,17 @@ class HumanGateNode(WorkflowNode[NodeInputT, dict], ABC):
     artifact_ref_field: str | None = None
     allowed_decisions: tuple[str, ...] = ("CONFIRM", "REJECT", "REVISE")
 
-    def execute(self, ctx: NodeContext, node_input: NodeInputT) -> NodeOutput[dict]:
+    def interrupt_payload(self, ctx: NodeContext, node_input: NodeInputT) -> dict[str, Any]:
+        """构造 interrupt 载荷；子类可扩展 allowed_decisions 与附加字段。"""
         artifact_ref = ctx._state.get(self.artifact_ref_field) if self.artifact_ref_field else None
-        value = interrupt({
+        return {
             "node_name": self.step.code,
             "artifact_ref": artifact_ref,
             "allowed_decisions": list(self.allowed_decisions),
-        })
+        }
+
+    def execute(self, ctx: NodeContext, node_input: NodeInputT) -> NodeOutput[dict]:
+        value = interrupt(self.interrupt_payload(ctx, node_input))
         return NodeOutput(state_update={"last_decision": value})
 
 
@@ -462,13 +509,13 @@ class WorkflowGraph:
         self._predecessors.setdefault(code, set())
         return self
 
-    def add_edge(self, source: str, target: str) -> "WorkflowGraph":
+    def add_edge(self, source: str, target: str, *, exclude_from_export: bool = False) -> "WorkflowGraph":
         self._graph.add_edge(source, target)
-        if source != START and target != END:
+        if source != START and target != END and not exclude_from_export:
             self._predecessors.setdefault(target, set()).add(source)
         return self
 
-    def add_conditional_edges(self, source: str, route: Any, path_map: Any = None) -> "WorkflowGraph":
+    def add_conditional_edges(self, source: str, route: Any, path_map: Any = None, *, exclude_from_export: set[str] | None = None) -> "WorkflowGraph":
         self._graph.add_conditional_edges(source, route, path_map)
         # LangGraph 接受 dict（路由值 -> 节点名）或目标节点集合。只要目标明确，
         # 远端注册关心的是“可能到达的节点依赖 source”，不需要保存路由返回值。
@@ -479,8 +526,11 @@ class WorkflowGraph:
         else:
             targets = ()
             self._unresolved_conditional_sources.add(source)
+        # 回环边（如驳回后回到前序节点）只作用于运行时 LangGraph，不进入注册依赖，
+        # 否则注册清单会出现环，无法做拓扑排序。
+        excluded = exclude_from_export or set()
         for target in targets:
-            if target != END:
+            if target != END and str(target) not in excluded:
                 self._predecessors.setdefault(str(target), set()).add(source)
         return self
 

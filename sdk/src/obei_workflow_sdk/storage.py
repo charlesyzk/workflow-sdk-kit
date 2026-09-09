@@ -165,8 +165,24 @@ class SQLAlchemyWorkflowStorage:
             return bool(db.scalar(select(WorkflowTask.cancel_requested).where(WorkflowTask.id == task_id)))
 
     def start_node(self, run_id: str, node_name: str, node_version: str = "1") -> tuple[str, int]:
-        """为节点分配递增 attempt 并记录开始时间与幂等键。"""
+        """为节点分配递增 attempt 并记录开始时间与幂等键。
+
+        LangGraph 恢复执行时会重新调用被 interrupt 的节点函数；此时复用该节点
+        上一段 WAITING_USER 执行记录（attempt 不变），避免人工门恢复被误判为
+        一次新的回环轮次。
+        """
         with self.session_factory.begin() as db:
+            waiting = db.scalar(
+                select(WorkflowNodeExecution).where(
+                    WorkflowNodeExecution.run_id == run_id,
+                    WorkflowNodeExecution.node_name == node_name,
+                    WorkflowNodeExecution.status == "WAITING_USER",
+                ).order_by(WorkflowNodeExecution.attempt.desc()).limit(1)
+            )
+            if waiting is not None:
+                waiting.status = "RUNNING"
+                waiting.finished_at = None
+                return waiting.id, int(waiting.attempt)
             latest = db.scalar(
                 select(func.max(WorkflowNodeExecution.attempt)).where(
                     WorkflowNodeExecution.run_id == run_id,
@@ -600,6 +616,18 @@ class SQLAlchemyWorkflowStorage:
                     "occurred_at": e.occurred_at.isoformat(),
                 } for e in events],
             }
+
+    def previous_successful_node(self, run_id: str, exclude_node: str) -> tuple[str, int] | None:
+        """返回本 run 内上一个已成功节点执行（排除自身），用于动态步骤 dependsOn。"""
+        with self.session_factory() as db:
+            row = db.scalar(select(WorkflowNodeExecution).where(
+                WorkflowNodeExecution.run_id == run_id,
+                WorkflowNodeExecution.status == "SUCCEEDED",
+                WorkflowNodeExecution.node_name != exclude_node,
+            ).order_by(WorkflowNodeExecution.finished_at.desc()).limit(1))
+            if row is None:
+                return None
+            return row.node_name, int(row.attempt)
 
     def successful_node_codes(self, run_id: str) -> set[str]:
         """返回该 Run 已成功的节点 code 集合，用于对账远端分支步骤的 Skipped 状态。"""

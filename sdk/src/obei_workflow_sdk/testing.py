@@ -15,5 +15,5 @@ class NullTaskSystemAdapter:
     def task_status(self, task_id: str, status: str, payload: dict[str, Any] | None = None) -> None:
         return None
 
-    def step_status(self, task_id: str, run_id: str, step_code: str, step_name: str, status: str, attempt: int, payload: dict[str, Any] | None = None) -> None:
+    def step_status(self, task_id: str, run_id: str, step_code: str, step_name: str, status: str, attempt: int, payload: dict[str, Any] | None = None, definition: dict[str, Any] | None = None) -> None:
         return None

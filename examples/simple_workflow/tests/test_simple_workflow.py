@@ -39,6 +39,25 @@ class FakeOpenAIAdapter:
         )
 
 
+class EmptyContentAdapter:
+    """模拟推理型模型：正文为空、推理非空（max_tokens 被 reasoning 吃光）。"""
+
+    name = "openai"
+    default_model = "fake-model"
+
+    async def generate(self, request, on_chunk=None):
+        if on_chunk:
+            await on_chunk(LLMChunk("reasoning", "思考中"))
+        return LLMResponse(
+            content="",
+            reasoning="思考中",
+            usage={"total_tokens": 8},
+            provider="openai",
+            model=self.default_model,
+            provider_request_id="fake-empty",
+        )
+
+
 class RecordingEventBus:
     def __init__(self):
         self.items = []
@@ -162,3 +181,30 @@ def test_streaming_node_emits_tokens_non_streaming_does_not(tmp_path: Path):
     assert adapter.stream_flags == [True, False]
     # LLM 审计表记录了流式标记
     assert [i["stream"] for i in storage.llm_invocations(accepted["task_id"])] == [True, False]
+
+
+def test_empty_content_emits_warning_event(tmp_path: Path):
+    """正文为空但推理非空时，SDK 只发 llm_empty_content 警告事件，不做自动回退。"""
+    storage = SQLAlchemyWorkflowStorage(f"sqlite:///{tmp_path / 'simple.db'}", create_tables=True)
+    registry = WorkflowRegistry(); registry.register(SimpleLLMWorkflow())
+    llms = LLMRegistry(); llms.register(EmptyContentAdapter())
+    events = RecordingEventBus()
+    runtime = WorkflowRuntime(
+        storage,
+        registry,
+        InlineDispatcher(),
+        NullTaskSystemAdapter(),
+        llm_registry=llms,
+        event_bus=events,
+    )
+    accepted = runtime.submit(
+        "simple_llm_workflow",
+        {"question": "测试空正文警告"},
+        "tester",
+    )
+    task = storage.get_task(accepted["task_id"])
+    assert task["status"] == "SUCCEEDED"
+
+    warnings = [p for _, p in events.items if p["type"] == "llm_empty_content"]
+    assert {w["node_name"] for w in warnings} == {"generate_draft", "polish_answer"}
+    assert all("empty content" in w["message"] for w in warnings)
